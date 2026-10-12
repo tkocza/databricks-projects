@@ -2,27 +2,33 @@ from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
 from db_flights_lakeflow.shared.metadata import TECHNICAL_COLUMNS
-from db_flights_lakeflow.shared.hash import build_row_hash
+
+BRONZE = "db_flights_lakeflow.bronze.airports"
+SILVER = "db_flights_lakeflow.silver.airports"
 
 
-@dp.table(name="db_flights_lakeflow.silver.airports")
-# errors and termination
+@dp.view(name="airports_latest")
 @dp.expect_or_fail("airport_code_not_null", "airport_code IS NOT NULL")
-# warnings
 @dp.expect("airport_code_valid_length", "length(airport_code) = 3")
-def silver_airports():
+def airports_latest():
 
-    df = spark.read.table("db_flights_lakeflow.bronze.airports")
+    bronze = spark.read.table(BRONZE)
 
-    rename_cols_map = {
-        "iata_code": "airport_code"
-    }
+    # find the new batch of records
+    latest_load = bronze.agg(F.max("load_date").alias("load_date"))
 
-    df = df.withColumnsRenamed(rename_cols_map)
-
-    exclude_key = TECHNICAL_COLUMNS + ["airport_code"]
-    cols_to_hash = [c for c in df.columns if c not in exclude_key]
-
-    df = df.withColumn("row_hash", build_row_hash(cols_to_hash))
+    df = bronze.join(latest_load, "load_date", "left_semi")
+    df = df.withColumnsRenamed({"iata_code": "airport_code"})
+    df = df.drop(*TECHNICAL_COLUMNS)
 
     return df
+
+
+dp.create_streaming_table(SILVER)
+
+dp.create_auto_cdc_from_snapshot_flow(
+    target=SILVER,
+    source="airports_latest",
+    keys=["airport_code"],
+    stored_as_scd_type=2,
+)
